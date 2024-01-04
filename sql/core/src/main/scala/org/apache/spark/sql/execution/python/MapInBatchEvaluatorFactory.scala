@@ -17,7 +17,7 @@
 
 package org.apache.spark.sql.execution.python
 
-import scala.collection.JavaConverters._
+import scala.jdk.CollectionConverters._
 
 import org.apache.spark.{PartitionEvaluator, PartitionEvaluatorFactory, TaskContext}
 import org.apache.spark.api.python.ChainedPythonFunctions
@@ -36,7 +36,7 @@ class MapInBatchEvaluatorFactory(
     sessionLocalTimeZone: String,
     largeVarTypes: Boolean,
     pythonRunnerConf: Map[String, String],
-    pythonMetrics: Map[String, SQLMetric],
+    val pythonMetrics: Map[String, SQLMetric],
     jobArtifactUUID: Option[String])
     extends PartitionEvaluatorFactory[InternalRow, InternalRow] {
 

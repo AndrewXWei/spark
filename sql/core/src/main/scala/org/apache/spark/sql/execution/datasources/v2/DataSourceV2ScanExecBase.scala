@@ -29,6 +29,7 @@ import org.apache.spark.sql.execution.metric.SQLMetrics
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.internal.connector.SupportsMetadata
 import org.apache.spark.sql.vectorized.ColumnarBatch
+import org.apache.spark.util.ArrayImplicits._
 import org.apache.spark.util.Utils
 
 trait DataSourceV2ScanExecBase extends LeafExecNode {
@@ -143,17 +144,16 @@ trait DataSourceV2ScanExecBase extends LeafExecNode {
         // also sort the input partitions according to their partition key order. This ensures
         // a canonical order from both sides of a bucketed join, for example.
         val partitionDataTypes = expressions.map(_.dataType)
-        val partitionOrdering: Ordering[(InternalRow, InputPartition)] = {
-          RowOrdering.createNaturalAscendingOrdering(partitionDataTypes).on(_._1)
-        }
-        val sortedKeyToPartitions = results.sorted(partitionOrdering)
-        val groupedPartitions = sortedKeyToPartitions
+        val rowOrdering = RowOrdering.createNaturalAscendingOrdering(partitionDataTypes)
+        val sortedKeyToPartitions = results.sorted(rowOrdering.on((t: (InternalRow, _)) => t._1))
+        val sortedGroupedPartitions = sortedKeyToPartitions
             .map(t => (InternalRowComparableWrapper(t._1, expressions), t._2))
             .groupBy(_._1)
             .toSeq
             .map { case (key, s) => KeyGroupedPartition(key.row, s.map(_._2)) }
+            .sorted(rowOrdering.on((k: KeyGroupedPartition) => k.value))
 
-        Some(KeyGroupedPartitionInfo(groupedPartitions, sortedKeyToPartitions.map(_._2)))
+        Some(KeyGroupedPartitionInfo(sortedGroupedPartitions, sortedKeyToPartitions.map(_._2)))
       }
     }
   }
@@ -199,7 +199,7 @@ trait DataSourceV2ScanExecBase extends LeafExecNode {
 
     val executionId = sparkContext.getLocalProperty(SQLExecution.EXECUTION_ID_KEY)
     SQLMetrics.postDriverMetricUpdates(sparkContext, executionId,
-      driveSQLMetrics)
+      driveSQLMetrics.toImmutableArraySeq)
   }
 
   override def doExecuteColumnar(): RDD[ColumnarBatch] = {

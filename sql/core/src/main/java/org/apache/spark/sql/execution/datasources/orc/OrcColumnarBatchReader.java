@@ -29,6 +29,7 @@ import org.apache.orc.OrcConf;
 import org.apache.orc.OrcFile;
 import org.apache.orc.Reader;
 import org.apache.orc.TypeDescription;
+import org.apache.orc.impl.OrcTail;
 import org.apache.orc.mapred.OrcInputFormat;
 
 import org.apache.spark.sql.catalyst.InternalRow;
@@ -120,13 +121,21 @@ public class OrcColumnarBatchReader extends RecordReader<Void, ColumnarBatch> {
   @Override
   public void initialize(
       InputSplit inputSplit, TaskAttemptContext taskAttemptContext) throws IOException {
+    initialize(inputSplit, taskAttemptContext, null);
+  }
+
+  public void initialize(
+      InputSplit inputSplit,
+      TaskAttemptContext taskAttemptContext,
+      OrcTail orcTail) throws IOException {
     FileSplit fileSplit = (FileSplit)inputSplit;
     Configuration conf = taskAttemptContext.getConfiguration();
     Reader reader = OrcFile.createReader(
       fileSplit.getPath(),
       OrcFile.readerOptions(conf)
         .maxLength(OrcConf.MAX_FILE_LENGTH.getLong(conf))
-        .filesystem(fileSplit.getPath().getFileSystem(conf)));
+        .filesystem(fileSplit.getPath().getFileSystem(conf))
+        .orcTail(orcTail));
     Reader.Options options =
       OrcInputFormat.buildOptions(conf, reader, fileSplit.getStart(), fileSplit.getLength());
     recordReader = reader.rows(options);
@@ -183,7 +192,7 @@ public class OrcColumnarBatchReader extends RecordReader<Void, ColumnarBatch> {
           Object defaultValue = ResolveDefaultColumns.existenceDefaultValues(requiredSchema)[i];
           if (defaultValue == null) {
             missingCol.putNulls(0, capacity);
-          } else if (!missingCol.appendObjects(capacity, defaultValue).isPresent()) {
+          } else if (missingCol.appendObjects(capacity, defaultValue).isEmpty()) {
             throw new IllegalArgumentException("Cannot assign default column value to result " +
               "column batch in vectorized Orc reader because the data type is not supported: " +
               defaultValue);

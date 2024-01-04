@@ -20,6 +20,7 @@ package org.apache.spark.sql.catalyst.plans.physical
 import scala.annotation.tailrec
 import scala.collection.mutable
 
+import org.apache.spark.{SparkException, SparkUnsupportedOperationException}
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions._
 import org.apache.spark.sql.catalyst.util.InternalRowComparableWrapper
@@ -55,7 +56,8 @@ case object UnspecifiedDistribution extends Distribution {
   override def requiredNumPartitions: Option[Int] = None
 
   override def createPartitioning(numPartitions: Int): Partitioning = {
-    throw new IllegalStateException("UnspecifiedDistribution does not have default partitioning.")
+    throw SparkException.internalError(
+      "UnspecifiedDistribution does not have default partitioning.")
   }
 }
 
@@ -220,7 +222,7 @@ trait Partitioning {
    * @param distribution the required clustered distribution for this partitioning
    */
   def createShuffleSpec(distribution: ClusteredDistribution): ShuffleSpec =
-    throw new IllegalStateException(s"Unexpected partitioning: ${getClass.getSimpleName}")
+    throw SparkException.internalError(s"Unexpected partitioning: ${getClass.getSimpleName}")
 
   /**
    * The actual method that defines whether this [[Partitioning]] can satisfy the given
@@ -258,18 +260,8 @@ case object SinglePartition extends Partitioning {
     SinglePartitionShuffleSpec
 }
 
-/**
- * Represents a partitioning where rows are split up across partitions based on the hash
- * of `expressions`.  All rows where `expressions` evaluate to the same values are guaranteed to be
- * in the same partition.
- *
- * Since [[StatefulOpClusteredDistribution]] relies on this partitioning and Spark requires
- * stateful operators to retain the same physical partitioning during the lifetime of the query
- * (including restart), the result of evaluation on `partitionIdExpression` must be unchanged
- * across Spark versions. Violation of this requirement may bring silent correctness issue.
- */
-case class HashPartitioning(expressions: Seq[Expression], numPartitions: Int)
-  extends Expression with Partitioning with Unevaluable {
+trait HashPartitioningLike extends Expression with Partitioning with Unevaluable {
+  def expressions: Seq[Expression]
 
   override def children: Seq[Expression] = expressions
   override def nullable: Boolean = false
@@ -294,6 +286,20 @@ case class HashPartitioning(expressions: Seq[Expression], numPartitions: Int)
       }
     }
   }
+}
+
+/**
+ * Represents a partitioning where rows are split up across partitions based on the hash
+ * of `expressions`.  All rows where `expressions` evaluate to the same values are guaranteed to be
+ * in the same partition.
+ *
+ * Since [[StatefulOpClusteredDistribution]] relies on this partitioning and Spark requires
+ * stateful operators to retain the same physical partitioning during the lifetime of the query
+ * (including restart), the result of evaluation on `partitionIdExpression` must be unchanged
+ * across Spark versions. Violation of this requirement may bring silent correctness issue.
+ */
+case class HashPartitioning(expressions: Seq[Expression], numPartitions: Int)
+  extends HashPartitioningLike {
 
   override def createShuffleSpec(distribution: ClusteredDistribution): ShuffleSpec =
     HashShuffleSpec(this, distribution)
@@ -306,6 +312,27 @@ case class HashPartitioning(expressions: Seq[Expression], numPartitions: Int)
 
   override protected def withNewChildrenInternal(
     newChildren: IndexedSeq[Expression]): HashPartitioning = copy(expressions = newChildren)
+}
+
+case class CoalescedBoundary(startReducerIndex: Int, endReducerIndex: Int)
+
+/**
+ * Represents a partitioning where partitions have been coalesced from a HashPartitioning into a
+ * fewer number of partitions.
+ */
+case class CoalescedHashPartitioning(from: HashPartitioning, partitions: Seq[CoalescedBoundary])
+  extends HashPartitioningLike {
+
+  override def expressions: Seq[Expression] = from.expressions
+
+  override def createShuffleSpec(distribution: ClusteredDistribution): ShuffleSpec =
+    CoalescedHashShuffleSpec(from.createShuffleSpec(distribution), partitions)
+
+  override val numPartitions: Int = partitions.length
+
+  override protected def withNewChildrenInternal(
+      newChildren: IndexedSeq[Expression]): CoalescedHashPartitioning =
+    copy(from = from.copy(expressions = newChildren))
 }
 
 /**
@@ -355,7 +382,14 @@ case class KeyGroupedPartitioning(
           } else {
             // We'll need to find leaf attributes from the partition expressions first.
             val attributes = expressions.flatMap(_.collectLeaves())
-            attributes.forall(x => requiredClustering.exists(_.semanticEquals(x)))
+
+            if (SQLConf.get.v2BucketingAllowJoinKeysSubsetOfPartitionKeys) {
+              // check that all join keys (required clustering keys) contained in partitioning
+              requiredClustering.forall(x => attributes.exists(_.semanticEquals(x))) &&
+                  expressions.forall(_.collectLeaves().size == 1)
+            } else {
+              attributes.forall(x => requiredClustering.exists(_.semanticEquals(x)))
+            }
           }
 
         case _ =>
@@ -364,8 +398,20 @@ case class KeyGroupedPartitioning(
     }
   }
 
-  override def createShuffleSpec(distribution: ClusteredDistribution): ShuffleSpec =
-    KeyGroupedShuffleSpec(this, distribution)
+  override def createShuffleSpec(distribution: ClusteredDistribution): ShuffleSpec = {
+    val result = KeyGroupedShuffleSpec(this, distribution)
+    if (SQLConf.get.v2BucketingAllowJoinKeysSubsetOfPartitionKeys) {
+      // If allowing join keys to be subset of clustering keys, we should create a new
+      // `KeyGroupedPartitioning` here that is grouped on the join keys instead, and use that as
+      // the returned shuffle spec.
+      val joinKeyPositions = result.keyPositions.map(_.nonEmpty).zipWithIndex.filter(_._1).map(_._2)
+      val projectedPartitioning = KeyGroupedPartitioning(expressions, joinKeyPositions,
+          partitionValues, originalPartitionValues)
+      result.copy(partitioning = projectedPartitioning, joinKeyPositions = Some(joinKeyPositions))
+    } else {
+      result
+    }
+  }
 
   lazy val uniquePartitionValues: Seq[InternalRow] = {
     partitionValues
@@ -378,8 +424,25 @@ case class KeyGroupedPartitioning(
 object KeyGroupedPartitioning {
   def apply(
       expressions: Seq[Expression],
-      partitionValues: Seq[InternalRow]): KeyGroupedPartitioning = {
-    KeyGroupedPartitioning(expressions, partitionValues.size, partitionValues, partitionValues)
+      projectionPositions: Seq[Int],
+      partitionValues: Seq[InternalRow],
+      originalPartitionValues: Seq[InternalRow]): KeyGroupedPartitioning = {
+    val projectedExpressions = projectionPositions.map(expressions(_))
+    val projectedPartitionValues = partitionValues.map(project(expressions, projectionPositions, _))
+    val projectedOriginalPartitionValues =
+      originalPartitionValues.map(project(expressions, projectionPositions, _))
+
+    KeyGroupedPartitioning(projectedExpressions, projectedPartitionValues.length,
+      projectedPartitionValues, projectedOriginalPartitionValues)
+  }
+
+  def project(
+      expressions: Seq[Expression],
+      positions: Seq[Int],
+      input: InternalRow): InternalRow = {
+    val projectedValues: Array[Any] = positions.map(i => input.get(i, expressions(i).dataType))
+      .toArray
+    new GenericInternalRow(projectedValues)
   }
 
   def supportsExpressions(expressions: Seq[Expression]): Boolean = {
@@ -571,8 +634,9 @@ trait ShuffleSpec {
    *  - [[isCompatibleWith]] returns false on the side where the `clustering` is from.
    */
   def createPartitioning(clustering: Seq[Expression]): Partitioning =
-    throw new UnsupportedOperationException("Operation unsupported for " +
-        s"${getClass.getCanonicalName}")
+    throw new SparkUnsupportedOperationException(
+      errorClass = "_LEGACY_ERROR_TEMP_3112",
+      messageParameters = Map("class" -> getClass.getCanonicalName))
 }
 
 case object SinglePartitionShuffleSpec extends ShuffleSpec {
@@ -672,9 +736,38 @@ case class HashShuffleSpec(
   override def numPartitions: Int = partitioning.numPartitions
 }
 
+case class CoalescedHashShuffleSpec(
+    from: ShuffleSpec,
+    partitions: Seq[CoalescedBoundary]) extends ShuffleSpec {
+
+  override def isCompatibleWith(other: ShuffleSpec): Boolean = other match {
+    case SinglePartitionShuffleSpec =>
+      numPartitions == 1
+    case CoalescedHashShuffleSpec(otherParent, otherPartitions) =>
+      partitions == otherPartitions && from.isCompatibleWith(otherParent)
+    case ShuffleSpecCollection(specs) =>
+      specs.exists(isCompatibleWith)
+    case _ =>
+      false
+  }
+
+  override def canCreatePartitioning: Boolean = false
+
+  override def numPartitions: Int = partitions.length
+}
+
+/**
+ * [[ShuffleSpec]] created by [[KeyGroupedPartitioning]].
+ *
+ * @param partitioning key grouped partitioning
+ * @param distribution distribution
+ * @param joinKeyPosition position of join keys among cluster keys.
+ *                        This is set if joining on a subset of cluster keys is allowed.
+ */
 case class KeyGroupedShuffleSpec(
     partitioning: KeyGroupedPartitioning,
-    distribution: ClusteredDistribution) extends ShuffleSpec {
+    distribution: ClusteredDistribution,
+    joinKeyPositions: Option[Seq[Int]] = None) extends ShuffleSpec {
 
   /**
    * A sequence where each element is a set of positions of the partition expression to the cluster
@@ -709,7 +802,7 @@ case class KeyGroupedShuffleSpec(
     //    3.3 each pair of partition expressions at the same index must share compatible
     //        transform functions.
     //  4. the partition values from both sides are following the same order.
-    case otherSpec @ KeyGroupedShuffleSpec(otherPartitioning, otherDistribution) =>
+    case otherSpec @ KeyGroupedShuffleSpec(otherPartitioning, otherDistribution, _) =>
       distribution.clustering.length == otherDistribution.clustering.length &&
         numPartitions == other.numPartitions && areKeysCompatible(otherSpec) &&
           partitioning.partitionValues.zip(otherPartitioning.partitionValues).forall {

@@ -36,6 +36,7 @@ import org.apache.spark.internal.config
 import org.apache.spark.resource.{ExecutorResourceRequests, ResourceProfile, TaskResourceProfile, TaskResourceRequests}
 import org.apache.spark.resource.ResourceUtils._
 import org.apache.spark.resource.TestResourceIDs._
+import org.apache.spark.status.api.v1.ThreadStackTrace
 import org.apache.spark.util.{Clock, ManualClock, ThreadUtils}
 
 class FakeSchedulerBackend extends SchedulerBackend {
@@ -44,6 +45,8 @@ class FakeSchedulerBackend extends SchedulerBackend {
   def reviveOffers(): Unit = {}
   def defaultParallelism(): Int = 1
   def maxNumConcurrentTasks(rp: ResourceProfile): Int = 0
+
+  override def getTaskThreadDump(taskId: Long, executorId: String): Option[ThreadStackTrace] = None
 }
 
 class TaskSchedulerImplSuite extends SparkFunSuite with LocalSparkContext
@@ -1812,10 +1815,10 @@ class TaskSchedulerImplSuite extends SparkFunSuite with LocalSparkContext
     var has1Gpu = 0
     for (tDesc <- taskDescriptions) {
       assert(tDesc.resources.contains(GPU))
-      if (tDesc.resources(GPU).addresses.size == 2) {
+      if (tDesc.resources(GPU).addresses.length == 2) {
         has2Gpus += 1
       }
-      if (tDesc.resources(GPU).addresses.size == 1) {
+      if (tDesc.resources(GPU).addresses.length == 1) {
         has1Gpu += 1
       }
     }
@@ -1833,7 +1836,7 @@ class TaskSchedulerImplSuite extends SparkFunSuite with LocalSparkContext
     taskDescriptions = taskScheduler.resourceOffers(workerOffers3).flatten
     assert(2 === taskDescriptions.length)
     assert(taskDescriptions.head.resources.contains(GPU))
-    assert(2 == taskDescriptions.head.resources(GPU).addresses.size)
+    assert(2 == taskDescriptions.head.resources(GPU).addresses.length)
   }
 
   test("Scheduler works with task resource profiles") {
@@ -1872,10 +1875,10 @@ class TaskSchedulerImplSuite extends SparkFunSuite with LocalSparkContext
     var has1Gpu = 0
     for (tDesc <- taskDescriptions) {
       assert(tDesc.resources.contains(GPU))
-      if (tDesc.resources(GPU).addresses.size == 2) {
+      if (tDesc.resources(GPU).addresses.length == 2) {
         has2Gpus += 1
       }
-      if (tDesc.resources(GPU).addresses.size == 1) {
+      if (tDesc.resources(GPU).addresses.length == 1) {
         has1Gpu += 1
       }
     }
@@ -1893,7 +1896,7 @@ class TaskSchedulerImplSuite extends SparkFunSuite with LocalSparkContext
     taskDescriptions = taskScheduler.resourceOffers(workerOffers3).flatten
     assert(2 === taskDescriptions.length)
     assert(taskDescriptions.head.resources.contains(GPU))
-    assert(2 == taskDescriptions.head.resources(GPU).addresses.size)
+    assert(2 == taskDescriptions.head.resources(GPU).addresses.length)
   }
 
   test("Calculate available tasks slots for task resource profiles") {

@@ -22,14 +22,12 @@ import time
 import unittest
 from datetime import date, datetime
 from decimal import Decimal
-from distutils.version import LooseVersion
 from typing import cast
 
 from pyspark import TaskContext
 from pyspark.rdd import PythonEvalType
 from pyspark.sql import Column
 from pyspark.sql.functions import array, col, expr, lit, sum, struct, udf, pandas_udf, PandasUDFType
-from pyspark.sql.pandas.utils import pyarrow_version_less_than_minimum
 from pyspark.sql.types import (
     IntegerType,
     ByteType,
@@ -183,7 +181,7 @@ class ScalarPandasUDFTestsMixin:
 
         mirror = pandas_udf(lambda s: s, df.dtypes[0][1])
 
-        self.assertEquals(
+        self.assertEqual(
             df.select(mirror(df.struct).alias("res")).first(),
             Row(
                 res=Row(
@@ -196,13 +194,13 @@ class ScalarPandasUDFTestsMixin:
         df = self.df_with_nested_maps
 
         str_repr = pandas_udf(lambda s: s.astype(str), StringType())
-        self.assertEquals(
+        self.assertEqual(
             df.select(str_repr(df.attributes).alias("res")).first(),
             Row(res="{'personal': {'name': 'John', 'city': 'New York'}}"),
         )
 
         extract_name = pandas_udf(lambda s: s.apply(lambda x: x["personal"]["name"]), StringType())
-        self.assertEquals(
+        self.assertEqual(
             df.select(extract_name(df.attributes).alias("res")).first(),
             Row(res="John"),
         )
@@ -211,15 +209,11 @@ class ScalarPandasUDFTestsMixin:
         df = self.df_with_nested_arrays
 
         str_repr = pandas_udf(lambda s: s.astype(str), StringType())
-        self.assertEquals(
+        self.assertEqual(
             df.select(str_repr(df.nested_array).alias("res")).first(),
             Row(res="[array([1, 2, 3], dtype=int32) array([4, 5], dtype=int32)]"),
         )
 
-    @unittest.skipIf(
-        pyarrow_version_less_than_minimum("2.0.0"),
-        "Pyarrow version must be 2.0.0 or higher",
-    )
     def test_pandas_array_struct(self):
         # SPARK-38098: Support Array of Struct for Pandas UDFs and toPandas
         import numpy as np
@@ -599,14 +593,9 @@ class ScalarPandasUDFTestsMixin:
         schema = StructType([StructField("map", MapType(StringType(), LongType()))])
         df = self.spark.createDataFrame(data, schema=schema)
         for udf_type in [PandasUDFType.SCALAR, PandasUDFType.SCALAR_ITER]:
-            if LooseVersion(pa.__version__) < LooseVersion("2.0.0"):
-                with QuietTest(self.sc):
-                    with self.assertRaisesRegex(Exception, "MapType.*not supported"):
-                        pandas_udf(lambda x: x, MapType(StringType(), LongType()), udf_type)
-            else:
-                map_f = pandas_udf(lambda x: x, MapType(StringType(), LongType()), udf_type)
-                result = df.select(map_f(col("map")))
-                self.assertEqual(df.collect(), result.collect())
+            map_f = pandas_udf(lambda x: x, MapType(StringType(), LongType()), udf_type)
+            result = df.select(map_f(col("map")))
+            self.assertEqual(df.collect(), result.collect())
 
     def test_vectorized_udf_complex(self):
         df = self.spark.range(10).select(
@@ -1461,9 +1450,7 @@ class ScalarPandasUDFTestsMixin:
 
             for offheap in ["true", "false"]:
                 with self.sql_conf({"spark.sql.columnVector.offheap.enabled": offheap}):
-                    self.assertEquals(
-                        self.spark.read.parquet(path).select(udf("id")).head(), Row(0)
-                    )
+                    self.assertEqual(self.spark.read.parquet(path).select(udf("id")).head(), Row(0))
         finally:
             shutil.rmtree(path)
 

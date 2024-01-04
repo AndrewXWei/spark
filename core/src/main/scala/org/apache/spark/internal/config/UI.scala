@@ -20,8 +20,6 @@ package org.apache.spark.internal.config
 import java.util.Locale
 import java.util.concurrent.TimeUnit
 
-import org.apache.commons.lang3.{JavaVersion, SystemUtils}
-
 import org.apache.spark.network.util.ByteUnit
 
 private[spark] object UI {
@@ -99,10 +97,16 @@ private[spark] object UI {
     .booleanConf
     .createWithDefault(true)
 
+  val UI_FLAMEGRAPH_ENABLED = ConfigBuilder("spark.ui.threadDump.flamegraphEnabled")
+    .doc("Whether to render the Flamegraph for executor thread dumps")
+    .version("4.0.0")
+    .booleanConf
+    .createWithDefault(true)
+
   val UI_HEAP_HISTOGRAM_ENABLED = ConfigBuilder("spark.ui.heapHistogramEnabled")
     .version("3.5.0")
     .booleanConf
-    .createWithDefault(SystemUtils.isJavaVersionAtLeast(JavaVersion.JAVA_11))
+    .createWithDefault(true)
 
   val UI_PROMETHEUS_ENABLED = ConfigBuilder("spark.ui.prometheus.enabled")
     .internal()
@@ -243,4 +247,11 @@ private[spark] object UI {
     .version("3.4.0")
     .booleanConf
     .createWithDefault(true)
+
+  val UI_JETTY_STOP_TIMEOUT = ConfigBuilder("spark.ui.jettyStopTimeout")
+    .internal()
+    .doc("Timeout for Jetty servers started in UIs, such as SparkUI, HistoryUI, etc, to stop.")
+    .version("4.0.0")
+    .timeConf(TimeUnit.MILLISECONDS)
+    .createWithDefaultString("30s")
 }

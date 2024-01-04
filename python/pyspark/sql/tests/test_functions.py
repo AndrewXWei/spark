@@ -66,7 +66,7 @@ class FunctionsTestsMixin:
             "random",  # namespace conflict with python built-in module
             "uuid",  # namespace conflict with python built-in module
             "chr",  # namespace conflict with python built-in function
-            "session_user",  # Scala only for now, needs implementation
+            "partitioning$",  # partitioning expressions for DSv2
         ]
 
         jvm_fn_set.difference_update(jvm_excluded_fn)
@@ -82,48 +82,10 @@ class FunctionsTestsMixin:
         missing_in_py = jvm_fn_set.difference(py_fn_set)
 
         # Functions that we expect to be missing in python until they are added to pyspark
-        expected_missing_in_py = {
-            # TODO: XML functions will soon be added and removed from this list
-            # https://issues.apache.org/jira/browse/SPARK-44788
-            "from_xml",
-            "schema_of_xml",
-        }
+        expected_missing_in_py = set()
 
         self.assertEqual(
             expected_missing_in_py, missing_in_py, "Missing functions in pyspark not as expected"
-        )
-
-    def test_public_function(self):
-        inspected_list = {name for (name, value) in getmembers(F, isfunction) if name[0] != "_"}
-
-        public_list = set(F.__all__)
-
-        # check alias: both function 'pow' and its alias 'power' should be included
-        self.assertTrue("pow" in inspected_list)
-        self.assertTrue("power" in inspected_list)
-        self.assertTrue("pow" in public_list)
-        self.assertTrue("power" in public_list)
-
-        inspected_execuded_list = {
-            "get_active_spark_context",  # internal helper function
-            "try_remote_functions",  # internal helper function
-            "to_str",  # internal helper function
-        }
-
-        self.assertEqual(
-            inspected_list - public_list,
-            inspected_execuded_list,
-            "Inspected functions NOT exposed!",
-        )
-
-        public_execuded_list = {
-            "PandasUDFType",  # type, not a function
-        }
-
-        self.assertEqual(
-            public_list - inspected_list,
-            public_execuded_list,
-            "Non-existent functions exposed!",
         )
 
     def test_explode(self):
@@ -384,7 +346,7 @@ class FunctionsTestsMixin:
 
         df = self.spark.createDataFrame([["nick"]], schema=["name"])
         with self.assertRaises(PySparkTypeError) as pe:
-            df.select(F.col("name").substr(0, F.lit(1)))
+            F.col("name").substr(0, F.lit(1))
 
         self.check_error(
             exception=pe.exception,
@@ -394,6 +356,18 @@ class FunctionsTestsMixin:
                 "arg_name2": "length",
                 "arg_type1": "int",
                 "arg_type2": "Column",
+            },
+        )
+
+        with self.assertRaises(PySparkTypeError) as pe:
+            F.col("name").substr("", "")
+
+        self.check_error(
+            exception=pe.exception,
+            error_class="NOT_COLUMN_OR_INT",
+            message_parameters={
+                "arg_name": "startPos",
+                "arg_type": "str",
             },
         )
 
@@ -940,7 +914,7 @@ class FunctionsTestsMixin:
             (3, "c"),
         ]
 
-        self.assertEquals(actual, expected)
+        self.assertEqual(actual, expected)
 
     def test_window_functions(self):
         df = self.spark.createDataFrame([(1, "1"), (2, "2"), (1, "2"), (1, "2")], ["key", "value"])
@@ -1023,12 +997,40 @@ class FunctionsTestsMixin:
         for r, ex in zip(rs, expected):
             self.assertEqual(tuple(r), ex[: len(r)])
 
+    def test_window_functions_moving_average(self):
+        data = [
+            (datetime.datetime(2023, 1, 1), 20),
+            (datetime.datetime(2023, 1, 2), 22),
+            (datetime.datetime(2023, 1, 3), 21),
+            (datetime.datetime(2023, 1, 4), 23),
+            (datetime.datetime(2023, 1, 5), 24),
+            (datetime.datetime(2023, 1, 6), 26),
+        ]
+        df = self.spark.createDataFrame(data, ["date", "temperature"])
+
+        def to_sec(i):
+            return i * 86400
+
+        w = Window.orderBy(F.col("date").cast("timestamp").cast("long")).rangeBetween(-to_sec(3), 0)
+        res = df.withColumn("3_day_avg_temp", F.avg("temperature").over(w))
+        rs = sorted(res.collect())
+        expected = [
+            (datetime.datetime(2023, 1, 1, 0, 0), 20, 20.0),
+            (datetime.datetime(2023, 1, 2, 0, 0), 22, 21.0),
+            (datetime.datetime(2023, 1, 3, 0, 0), 21, 21.0),
+            (datetime.datetime(2023, 1, 4, 0, 0), 23, 21.5),
+            (datetime.datetime(2023, 1, 5, 0, 0), 24, 22.5),
+            (datetime.datetime(2023, 1, 6, 0, 0), 26, 23.5),
+        ]
+        for r, ex in zip(rs, expected):
+            self.assertEqual(tuple(r), ex[: len(r)])
+
     def test_window_time(self):
         df = self.spark.createDataFrame(
             [(datetime.datetime(2016, 3, 11, 9, 0, 7), 1)], ["date", "val"]
         )
 
-        w = df.groupBy(F.window("date", "5 seconds")).agg(F.sum("val").alias("sum"))
+        w = df.groupBy(F.window("date", "5 seconds", "5 seconds")).agg(F.sum("val").alias("sum"))
         r = w.select(
             w.window.end.cast("string").alias("end"),
             F.window_time(w.window).cast("string").alias("window_time"),
@@ -1069,10 +1071,10 @@ class FunctionsTestsMixin:
             [Row(val=None), Row(val=None), Row(val=None)],
         )
 
-        with self.assertRaisesRegex(tpe, "too big"):
+        with self.assertRaisesRegex(tpe, r"\[USER_RAISED_EXCEPTION\] too big"):
             df.select(F.assert_true(df.id < 2, "too big")).toDF("val").collect()
 
-        with self.assertRaisesRegex(tpe, "2000000"):
+        with self.assertRaisesRegex(tpe, r"\[USER_RAISED_EXCEPTION\] 2000000.0"):
             df.select(F.assert_true(df.id < 2, df.id * 1e6)).toDF("val").collect()
 
         with self.assertRaises(PySparkTypeError) as pe:
@@ -1319,6 +1321,27 @@ class FunctionsTestsMixin:
             message_parameters={"arg_name": "schema", "arg_type": "int"},
         )
 
+    def test_schema_of_xml(self):
+        with self.assertRaises(PySparkTypeError) as pe:
+            F.schema_of_xml(1)
+
+        self.check_error(
+            exception=pe.exception,
+            error_class="NOT_COLUMN_OR_STR",
+            message_parameters={"arg_name": "xml", "arg_type": "int"},
+        )
+
+    def test_from_xml(self):
+        df = self.spark.range(10)
+        with self.assertRaises(PySparkTypeError) as pe:
+            F.from_xml(df.id, 1)
+
+        self.check_error(
+            exception=pe.exception,
+            error_class="NOT_COLUMN_OR_STR_OR_STRUCT",
+            message_parameters={"arg_name": "schema", "arg_type": "int"},
+        )
+
     def test_greatest(self):
         df = self.spark.range(10)
         with self.assertRaises(PySparkValueError) as pe:
@@ -1360,6 +1383,15 @@ class FunctionsTestsMixin:
             message_parameters={"arg_name": "gapDuration", "arg_type": "int"},
         )
 
+    def test_current_user(self):
+        df = self.spark.range(1).select(F.current_user())
+        self.assertIsInstance(df.first()[0], str)
+        self.assertEqual(df.schema.names[0], "current_user()")
+        df = self.spark.range(1).select(F.user())
+        self.assertEqual(df.schema.names[0], "user()")
+        df = self.spark.range(1).select(F.session_user())
+        self.assertEqual(df.schema.names[0], "session_user()")
+
     def test_bucket(self):
         with self.assertRaises(PySparkTypeError) as pe:
             F.bucket("5", "id")
@@ -1368,6 +1400,70 @@ class FunctionsTestsMixin:
             exception=pe.exception,
             error_class="NOT_COLUMN_OR_INT",
             message_parameters={"arg_name": "numBuckets", "arg_type": "str"},
+        )
+
+    def test_to_timestamp_ltz(self):
+        df = self.spark.createDataFrame([("2016-12-31",)], ["e"])
+        df = df.select(F.to_timestamp_ltz(df.e, F.lit("yyyy-MM-dd")).alias("r"))
+        self.assertIsInstance(df.first()[0], datetime.datetime)
+
+        df = self.spark.createDataFrame([("2016-12-31",)], ["e"])
+        df = df.select(F.to_timestamp_ltz(df.e).alias("r"))
+        self.assertIsInstance(df.first()[0], datetime.datetime)
+
+    def test_to_timestamp_ntz(self):
+        df = self.spark.createDataFrame([("2016-12-31",)], ["e"])
+        df = df.select(F.to_timestamp_ntz(df.e).alias("r"))
+        self.assertIsInstance(df.first()[0], datetime.datetime)
+
+    def test_convert_timezone(self):
+        df = self.spark.createDataFrame([("2015-04-08",)], ["dt"])
+        df = df.select(
+            F.convert_timezone(F.lit("America/Los_Angeles"), F.lit("Asia/Hong_Kong"), "dt")
+        )
+        self.assertIsInstance(df.first()[0], datetime.datetime)
+
+    def test_map_concat(self):
+        df = self.spark.sql("SELECT map(1, 'a', 2, 'b') as map1, map(3, 'c') as map2")
+        self.assertEqual(
+            df.select(F.map_concat(["map1", "map2"]).alias("map3")).first()[0],
+            {1: "a", 2: "b", 3: "c"},
+        )
+
+    def test_version(self):
+        self.assertIsInstance(self.spark.range(1).select(F.version()).first()[0], str)
+
+    # SPARK-45216: Fix non-deterministic seeded Dataset APIs
+    def test_non_deterministic_with_seed(self):
+        df = self.spark.createDataFrame([([*range(0, 10, 1)],)], ["a"])
+
+        r = F.rand()
+        r2 = F.randn()
+        r3 = F.shuffle("a")
+        res = df.select(r, r, r2, r2, r3, r3).collect()
+        for i in range(3):
+            self.assertEqual(res[0][i * 2], res[0][i * 2 + 1])
+
+    def test_current_timestamp(self):
+        df = self.spark.range(1).select(F.current_timestamp())
+        self.assertIsInstance(df.first()[0], datetime.datetime)
+        self.assertEqual(df.schema.names[0], "current_timestamp()")
+        df = self.spark.range(1).select(F.now())
+        self.assertIsInstance(df.first()[0], datetime.datetime)
+        self.assertEqual(df.schema.names[0], "now()")
+
+    def test_json_tuple_empty_fields(self):
+        df = self.spark.createDataFrame(
+            [
+                ("1", """{"f1": "value1", "f2": "value2"}"""),
+                ("2", """{"f1": "value12"}"""),
+            ],
+            ("key", "jstring"),
+        )
+        self.assertRaisesRegex(
+            PySparkValueError,
+            "At least one field must be specified",
+            lambda: df.select(F.json_tuple(df.jstring)),
         )
 
 

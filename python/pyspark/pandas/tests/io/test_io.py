@@ -14,7 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-from distutils.version import LooseVersion
+
 import unittest
 from io import StringIO
 
@@ -24,7 +24,7 @@ import pandas as pd
 from pyspark import pandas as ps
 from pyspark.testing.pandasutils import (
     have_tabulate,
-    ComparisonTestBase,
+    PandasOnSparkTestCase,
     tabulate_requirement_message,
 )
 from pyspark.testing.sqlutils import SQLTestUtils
@@ -94,10 +94,6 @@ class FrameIOMixin:
         psdf = ps.DataFrame.from_dict(data, orient="index", columns=["A", "B", "C", "D"])
         self.assert_eq(pdf, psdf)
 
-    @unittest.skipIf(
-        LooseVersion(pd.__version__) < LooseVersion("1.3.0"),
-        "pandas support `Styler.to_latex` since 1.3.0",
-    )
     def test_style(self):
         # Currently, the `style` function returns a pandas object `Styler` as it is,
         # processing only the number of rows declared in `compute.max_rows`.
@@ -149,7 +145,11 @@ class FrameIOMixin:
         self.assert_eq(pdf_io.getvalue().split("\n")[1:], psdf_io.getvalue().split("\n")[1:])
 
 
-class FrameIOTests(FrameIOMixin, ComparisonTestBase, SQLTestUtils):
+class FrameIOTests(
+    FrameIOMixin,
+    PandasOnSparkTestCase,
+    SQLTestUtils,
+):
     pass
 
 

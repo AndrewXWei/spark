@@ -20,18 +20,18 @@ package org.apache.spark.sql.streaming
 import java.io.{File, FileWriter}
 import java.util.concurrent.TimeUnit
 
-import scala.collection.JavaConverters._
 import scala.collection.mutable
+import scala.jdk.CollectionConverters._
 
 import org.scalatest.concurrent.Eventually.eventually
 import org.scalatest.concurrent.Futures.timeout
 import org.scalatest.time.SpanSugar._
 
+import org.apache.spark.SparkException
 import org.apache.spark.api.java.function.VoidFunction2
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.{DataFrame, ForeachWriter, Row, SparkSession}
-import org.apache.spark.sql.functions.col
-import org.apache.spark.sql.functions.window
+import org.apache.spark.sql.functions.{col, udf, window}
 import org.apache.spark.sql.streaming.StreamingQueryListener.{QueryIdleEvent, QueryStartedEvent, QueryTerminatedEvent}
 import org.apache.spark.sql.test.{QueryTest, SQLHelper}
 import org.apache.spark.util.SparkFileUtils
@@ -173,6 +173,86 @@ class ClientStreamingQuerySuite extends QueryTest with SQLHelper with Logging {
         q.awaitTermination()
       }
     }
+  }
+
+  test("throw exception in streaming") {
+    try {
+      val session = spark
+      import session.implicits._
+
+      val checkForTwo = udf((value: Int) => {
+        if (value == 2) {
+          throw new RuntimeException("Number 2 encountered!")
+        }
+        value
+      })
+
+      val query = spark.readStream
+        .format("rate")
+        .option("rowsPerSecond", "1")
+        .load()
+        .select(checkForTwo($"value").as("checkedValue"))
+        .writeStream
+        .outputMode("append")
+        .format("console")
+        .start()
+
+      val exception = intercept[StreamingQueryException] {
+        query.awaitTermination()
+      }
+
+      assert(exception.getErrorClass != null)
+      assert(exception.getMessageParameters().get("id") == query.id.toString)
+      assert(exception.getMessageParameters().get("runId") == query.runId.toString)
+      assert(!exception.getMessageParameters().get("startOffset").isEmpty)
+      assert(!exception.getMessageParameters().get("endOffset").isEmpty)
+      assert(exception.getCause.isInstanceOf[SparkException])
+      assert(exception.getCause.getCause.isInstanceOf[SparkException])
+      assert(exception.getCause.getCause.getCause.isInstanceOf[SparkException])
+      assert(
+        exception.getCause.getCause.getCause.getMessage
+          .contains("java.lang.RuntimeException: Number 2 encountered!"))
+    } finally {
+      spark.streams.resetTerminated()
+    }
+  }
+
+  test("throw exception in streaming, check with StreamingQueryManager") {
+    val session = spark
+    import session.implicits._
+
+    val checkForTwo = udf((value: Int) => {
+      if (value == 2) {
+        throw new RuntimeException("Number 2 encountered!")
+      }
+      value
+    })
+
+    val query = spark.readStream
+      .format("rate")
+      .option("rowsPerSecond", "1")
+      .load()
+      .select(checkForTwo($"value").as("checkedValue"))
+      .writeStream
+      .outputMode("append")
+      .format("console")
+      .start()
+
+    val exception = intercept[StreamingQueryException] {
+      spark.streams.awaitAnyTermination()
+    }
+
+    assert(exception.getErrorClass != null)
+    assert(exception.getMessageParameters().get("id") == query.id.toString)
+    assert(exception.getMessageParameters().get("runId") == query.runId.toString)
+    assert(!exception.getMessageParameters().get("startOffset").isEmpty)
+    assert(!exception.getMessageParameters().get("endOffset").isEmpty)
+    assert(exception.getCause.isInstanceOf[SparkException])
+    assert(exception.getCause.getCause.isInstanceOf[SparkException])
+    assert(exception.getCause.getCause.getCause.isInstanceOf[SparkException])
+    assert(
+      exception.getCause.getCause.getCause.getMessage
+        .contains("java.lang.RuntimeException: Number 2 encountered!"))
   }
 
   test("foreach Row") {

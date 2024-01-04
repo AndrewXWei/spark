@@ -15,7 +15,6 @@
 # limitations under the License.
 #
 from datetime import datetime
-from distutils.version import LooseVersion
 import sys
 import unittest
 from typing import List
@@ -24,6 +23,7 @@ import numpy as np
 import pandas as pd
 
 from pyspark import pandas as ps
+from pyspark.loose_version import LooseVersion
 from pyspark.pandas.config import option_context
 from pyspark.testing.pandasutils import ComparisonTestBase
 from pyspark.testing.sqlutils import SQLTestUtils
@@ -39,12 +39,6 @@ class FrameApplyFunctionMixin:
             {"a": [1, 2, 3, 4, 5, 6, 7, 8, 9], "b": [4, 5, 6, 3, 2, 1, 0, 0, 0]},
             index=np.random.rand(9),
         )
-
-    @property
-    def df_pair(self):
-        pdf = self.pdf
-        psdf = ps.from_pandas(pdf)
-        return pdf, psdf
 
     def test_apply(self):
         pdf = pd.DataFrame(
@@ -253,8 +247,8 @@ class FrameApplyFunctionMixin:
         actual.columns = ["a", "b"]
         self.assert_eq(actual, pdf)
 
-        # For NumPy typing, NumPy version should be 1.21+ and Python version should be 3.8+
-        if sys.version_info >= (3, 8) and LooseVersion(np.__version__) >= LooseVersion("1.21"):
+        # For NumPy typing, NumPy version should be 1.21+
+        if LooseVersion(np.__version__) >= LooseVersion("1.21"):
             import numpy.typing as ntp
 
             psdf = ps.from_pandas(pdf)

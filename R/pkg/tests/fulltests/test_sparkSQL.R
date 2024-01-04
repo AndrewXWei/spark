@@ -1414,7 +1414,7 @@ test_that("test HiveContext", {
 
     # Invalid mode
     expect_error(saveAsTable(df, "parquetest", "parquet", mode = "abc", path = parquetDataPath),
-                 "illegal argument - Unknown save mode: abc")
+                 "Error in mode : analysis error - \\[INVALID_SAVE_MODE\\].*")
     unsetHiveContext()
   }
 })
@@ -4103,10 +4103,7 @@ test_that("catalog APIs, listCatalogs, setCurrentCatalog, currentCatalog", {
   expect_equal(currentCatalog(), "spark_catalog")
   expect_error(setCurrentCatalog("spark_catalog"), NA)
   expect_error(setCurrentCatalog("zxwtyswklpf"),
-               paste0("Error in setCurrentCatalog : ",
-               "org.apache.spark.sql.connector.catalog.CatalogNotFoundException: ",
-               "Catalog 'zxwtyswklpf' plugin class not found: ",
-               "spark.sql.catalog.zxwtyswklpf is not defined"))
+               "[CATALOG_NOT_FOUND]*`zxwtyswklpf`*")
   catalogs <- collect(listCatalogs())
 })
 
@@ -4199,7 +4196,7 @@ test_that("catalog APIs, listTables, getTable, listColumns, listFunctions, funct
 
   # recoverPartitions does not work with temporary view
   expect_error(recoverPartitions("cars"),
-               "[UNSUPPORTED_TEMP_VIEW_OPERATION.WITH_SUGGESTION]*`cars`*")
+               "[EXPECT_TABLE_NOT_VIEW.NO_ALTERNATIVE]*`cars`*")
   expect_error(refreshTable("cars"), NA)
   expect_error(refreshByPath("/"), NA)
 
